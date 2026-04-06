@@ -166,13 +166,13 @@ def compute_loss(
     prompt_full = format_rewrite_prompt(instruction, original) + target_rewrite
 
     with torch.no_grad():
-        inputs = tokenizer.encode(prompt_full, return_tensors="pt")
+        inputs = tokenizer.encode(prompt_full, return_tensors="pt").to(model.device)
         labels = tokenizer.encode(" " + target_rewrite, return_tensors="pt")
 
         full_labels = torch.cat([
             torch.tensor([-100] * (len(inputs[0]) - len(labels[0]) + 1)),
             labels[0][1:],
-        ])
+        ]).to(model.device)
         full_labels = full_labels[None, :]
 
         loss = model(input_ids=inputs, labels=full_labels).loss
@@ -185,6 +185,8 @@ def run():
     parser.add_argument("--model_path", type=str, default="google/gemma-7b-it")
     parser.add_argument("--test_csv", type=str, required=True)
     parser.add_argument("--output_csv", type=str, default="submission.csv")
+    parser.add_argument("--gpu_max_memory", type=str, default="14GB", help="Max VRAM allocation per GPU")
+    parser.add_argument("--cpu_max_memory", type=str, default="30GB", help="Max RAM allocation")
     args, _ = parser.parse_known_args()
 
     state = Accelerator()
@@ -201,12 +203,16 @@ def run():
         bnb_4bit_compute_dtype=torch.float16,
     )
 
+    device_index = device.index if device.type == "cuda" and device.index is not None else 0
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         quantization_config=quantization_config,
-        device_map={"": device},
+        device_map={"": device_index},
         low_cpu_mem_usage=True,
+        dtype=torch.float16,
+        max_memory={device_index: args.gpu_max_memory, "cpu": args.cpu_max_memory},
     )
 
     # =========================================================================
@@ -309,6 +315,10 @@ def run():
             print(f"\nSaved {len(output_df)} predictions to {args.output_csv}")
         except Exception:
             pass
+
+    
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
